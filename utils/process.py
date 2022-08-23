@@ -1,11 +1,15 @@
+import os
+
 import numpy as np
 import pickle as pkl
 import networkx as nx
 import scipy.sparse as sp
-from scipy.sparse.linalg.eigen.arpack import eigsh
+import torch_geometric.data
 import sys
 import torch
 import torch.nn as nn
+from torch_geometric.datasets import Reddit, PPI, Planetoid
+import torch.nn.functional as F
 
 def parse_skipgram(fname):
     with open(fname) as f:
@@ -102,7 +106,72 @@ def sample_mask(idx, l):
     mask[idx] = 1
     return np.array(mask, dtype=np.bool)
 
-def load_data(dataset_str): # {'pubmed', 'citeseer', 'cora'}
+def make_ds_inductive(data: torch_geometric.data.Data) -> torch_geometric.data.Data:
+    # Remove the edges between the test/val nodes to train nodes, this acts as validation step
+    is_target_edge_train = data.train_mask[data.edge_index[1, :]]
+    is_source_edge_val_test = torch.logical_not(data.train_mask[data.edge_index[0, :]])
+
+    invalid_edges = torch.logical_and(is_target_edge_train, is_source_edge_val_test)
+    is_valid_adj = torch.any(invalid_edges)
+    loli = 3
+    return data
+
+
+def load_data(dataset):
+    DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    is_inductive=False
+    if dataset == "cora":  # Transductive
+        ds = Planetoid(root=os.path.join(DATA_DIR, "cora"), name="Cora")
+        data = ds.data
+    elif dataset == "pubmed":  # Transductive
+        ds = Planetoid(root=os.path.join(DATA_DIR, "pubmed"), name="PubMed")
+        data = ds.data
+    elif dataset == "citeseer":  # Transductive
+        ds = Planetoid(root=os.path.join(DATA_DIR, "citeseer"), name="CiteSeer")
+        data = ds.data
+    elif dataset == "ppi":  # Inductive
+        data_dir = os.path.join(DATA_DIR, "ppi")
+        train_ds = PPI(root=data_dir, split="train")
+        val_ds = PPI(root=data_dir, split="val")
+        test_ds = PPI(root=data_dir, split="test")
+
+        # Build masks
+        data_map = {"train_mask": [],
+                    "val_mask": [],
+                    "test_mask": []}
+        for curr_ds, relevant_mask in ((train_ds, "train_mask"), (val_ds, "val_mask"), (test_ds, "test_mask")):
+            for data in curr_ds:
+                data.val_mask = torch.zeros((data.x.size(0),), dtype=torch.bool)
+                data.train_mask = torch.zeros((data.x.size(0),), dtype=torch.bool)
+                data.test_mask = torch.zeros((data.x.size(0),), dtype=torch.bool)
+                setattr(data, relevant_mask, torch.ones((data.x.size(0),), dtype=torch.bool))
+                data_map[relevant_mask].append(data)
+
+        # Merge graphs
+        data = data_map["train_mask"] + data_map["val_mask"] + data_map["test_mask"]
+        is_inductive = True
+    elif dataset == "reddit":  # Inductive
+        ds = Reddit(root=os.path.join(DATA_DIR, "reddit"))
+        data = ds.data
+        is_inductive = True
+    else:
+        raise RuntimeError(f"Invalid DS name given: {dataset}")
+
+    if is_inductive:
+        data = make_ds_inductive(data)
+
+    adj = torch_geometric.utils.to_scipy_sparse_matrix(data.edge_index)
+    features = data.x.numpy()
+    labels = F.one_hot(data.y).numpy()
+    idx_train = torch.where(data.train_mask)[0].numpy()
+    idx_val = torch.where(data.val_mask)[0].numpy()
+    idx_test = torch.where(data.test_mask)[0].numpy()
+
+    return adj, features, labels, idx_train, idx_val, idx_test
+
+
+def load_data_old(dataset_str): # {'pubmed', 'citeseer', 'cora'}
     """Load data."""
     names = ['x', 'y', 'tx', 'ty', 'allx', 'ally', 'graph']
     objects = []
@@ -184,7 +253,7 @@ def preprocess_features(features):
     r_inv[np.isinf(r_inv)] = 0.
     r_mat_inv = sp.diags(r_inv)
     features = r_mat_inv.dot(features)
-    return features.todense(), sparse_to_tuple(features)
+    return features
 
 def normalize_adj(adj):
     """Symmetrically normalize adjacency matrix."""
