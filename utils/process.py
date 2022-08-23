@@ -1,4 +1,5 @@
 import os
+from typing import List
 
 import numpy as np
 import pickle as pkl
@@ -106,14 +107,16 @@ def sample_mask(idx, l):
     mask[idx] = 1
     return np.array(mask, dtype=np.bool)
 
-def make_ds_inductive(data: torch_geometric.data.Data) -> torch_geometric.data.Data:
-    # Remove the edges between the test/val nodes to train nodes, this acts as validation step
-    is_target_edge_train = data.train_mask[data.edge_index[1, :]]
-    is_source_edge_val_test = torch.logical_not(data.train_mask[data.edge_index[0, :]])
 
-    invalid_edges = torch.logical_and(is_target_edge_train, is_source_edge_val_test)
-    is_valid_adj = torch.any(invalid_edges)
-    loli = 3
+def make_ds_inductive(data: List[torch_geometric.data.Data]) -> List[torch_geometric.data.Data]:
+    for curr_data in data:
+        # Remove the edges between the test/val nodes to train nodes, this acts as validation step
+        is_target_edge_train = curr_data.train_mask[curr_data.edge_index[1, :]]
+        is_source_edge_val_test = torch.logical_not(curr_data.train_mask[curr_data.edge_index[0, :]])
+
+        invalid_edges = torch.logical_and(is_target_edge_train, is_source_edge_val_test)
+        is_valid_adj = torch.any(invalid_edges)
+        loli = 3
     return data
 
 
@@ -123,13 +126,13 @@ def load_data(dataset):
     is_inductive=False
     if dataset == "cora":  # Transductive
         ds = Planetoid(root=os.path.join(DATA_DIR, "cora"), name="Cora")
-        data = ds.data
+        data = [ds.data]
     elif dataset == "pubmed":  # Transductive
         ds = Planetoid(root=os.path.join(DATA_DIR, "pubmed"), name="PubMed")
-        data = ds.data
+        data = [ds.data]
     elif dataset == "citeseer":  # Transductive
         ds = Planetoid(root=os.path.join(DATA_DIR, "citeseer"), name="CiteSeer")
-        data = ds.data
+        data = [ds.data]
     elif dataset == "ppi":  # Inductive
         data_dir = os.path.join(DATA_DIR, "ppi")
         train_ds = PPI(root=data_dir, split="train")
@@ -153,7 +156,7 @@ def load_data(dataset):
         is_inductive = True
     elif dataset == "reddit":  # Inductive
         ds = Reddit(root=os.path.join(DATA_DIR, "reddit"))
-        data = ds.data
+        data = [ds.data] # TODO: do neighbour loader
         is_inductive = True
     else:
         raise RuntimeError(f"Invalid DS name given: {dataset}")
@@ -161,14 +164,17 @@ def load_data(dataset):
     if is_inductive:
         data = make_ds_inductive(data)
 
-    adj = torch_geometric.utils.to_scipy_sparse_matrix(data.edge_index)
-    features = data.x.numpy()
-    labels = F.one_hot(data.y).numpy()
-    idx_train = torch.where(data.train_mask)[0].numpy()
-    idx_val = torch.where(data.val_mask)[0].numpy()
-    idx_test = torch.where(data.test_mask)[0].numpy()
+    num_classes = torch.max(torch.cat([d.y for d in data])) + 1
 
-    return adj, features, labels, idx_train, idx_val, idx_test
+    for d in data:
+        d.edge_index = torch_geometric.utils.add_self_loops(d.edge_index)[0]
+
+    for d in data:
+        d.y = F.one_hot(d.y, num_classes)
+
+    features_dim = data[0].x.size(1)
+
+    return data, features_dim, num_classes
 
 
 def load_data_old(dataset_str): # {'pubmed', 'citeseer', 'cora'}
